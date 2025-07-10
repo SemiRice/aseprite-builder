@@ -7,6 +7,7 @@ on:
     paths:
       - 'BuildLog.md'
   workflow_dispatch:
+
 env:
   BUILD_TYPE: Release
 
@@ -22,9 +23,9 @@ jobs:
         id: aseprite-link
         uses: a1393323447/fetch-release@main
         with:
-            group: aseprite
-            repo: aseprite
-            match: Aseprite-.*?-Source.zip
+          group: aseprite
+          repo: aseprite
+          match: Aseprite-.*?-Source.zip
 
   create-release:
     name: Create Release
@@ -35,12 +36,26 @@ jobs:
     outputs:
       download-link: ${{ needs.fetch-aseprite-info.outputs.download-link }}
       release-tag: ${{ needs.fetch-aseprite-info.outputs.release-tag }}
+      release-body: ${{ steps.release-data.outputs.release-body }}
     steps:
       - uses: actions/checkout@v2
+
+      - name: Get Aseprite release body
+        id: release-data
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const release = await github.rest.repos.getReleaseByTag({
+              owner: 'aseprite',
+              repo: 'aseprite',
+              tag: '${{ needs.fetch-aseprite-info.outputs.release-tag }}'
+            });
+            core.setOutput('release-body', release.data.body);
+
       - uses: ncipollo/release-action@v1
         with:
           tag: ${{ needs.fetch-aseprite-info.outputs.release-tag }}
-          body: Aseprite-${{ needs.fetch-aseprite-info.outputs.release-tag }}
+          body: ${{ steps.release-data.outputs.release-body }}
           skipIfReleaseExists: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -51,41 +66,36 @@ jobs:
       contents: write
     runs-on: ${{ matrix.os }}
     strategy:
-        matrix:
-          os: [ windows-latest ]
-        fail-fast: false
+      matrix:
+        os: [ windows-latest ]
+      fail-fast: false
     steps:
-      - name: Install Dependencies
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y \
-            libpixman-1-dev libfreetype6-dev libharfbuzz-dev zlib1g-dev \
-            libx11-dev libxcursor-dev libxi-dev libgl1-mesa-dev libfontconfig1-dev
       - uses: actions/checkout@v4
+
       - name: Install Aseprite
         shell: bash
         run: |
           git clone --recurse-submodules -j8 https://github.com/aseprite/aseprite --branch ${{ needs.create-release.outputs.release-tag }}
+
+      - name: Patch version.h with actual tag
+        shell: bash
+        working-directory: aseprite/src
+        run: |
+          raw_tag="${{ needs.create-release.outputs.release-tag }}"
+          version="${raw_tag#v}"
+          sed -i "s/^#define ASEPRITE_VERSION .*/#define ASEPRITE_VERSION \"${version}\"/" version.h
+
       - name: Install Skia
         working-directory: aseprite
         shell: bash
         run: |
-          if [[ "${{ runner.os }}" == "Windows" ]] ; then
-            choco install wget -y --no-progress
-            wget https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/Skia-Windows-Release-x64.zip
-            unzip Skia-Windows-Release-x64.zip -d skia
-          elif [[ "${{ runner.os }}" == "macOS" ]] ; then
-            wget https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/Skia-macOS-Release-arm64.zip
-            unzip Skia-macOS-Release-arm64.zip -d skia
-          else
-            wget https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/Skia-Linux-Release-x64.zip
-            unzip Skia-Linux-Release-x64.zip -d skia
-          fi
+          choco install wget -y --no-progress
+          wget https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/Skia-Windows-Release-x64.zip
+          unzip Skia-Windows-Release-x64.zip -d skia
+
       - uses: aseprite/get-ninja@main
       - uses: ilammy/msvc-dev-cmd@v1
-        if: runner.os == 'Windows'
+
       - name: Generating Makefiles
         shell: bash
         working-directory: aseprite
@@ -93,16 +103,10 @@ jobs:
           export enable_ccache=off
           export laf_backend=skia
           export enable_scripting=on
-
-          if [[ "${{ runner.os }}" == "macOS" ]] ; then
-            export skia_arch=arm64
-          else
-            export skia_arch=x64
-          fi
+          export skia_arch=x64
 
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.9 \
             -DENABLE_TESTS=OFF \
             -DENABLE_SCRIPTING=$enable_scripting \
             -DENABLE_CCACHE=$enable_ccache \
@@ -110,21 +114,36 @@ jobs:
             -DSKIA_DIR=$(realpath skia) \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-$skia_arch)
+
       - name: Compiling
         shell: bash
         working-directory: aseprite
         run: |
           cd build && ninja
+
       - name: Clean Up Build folder
         working-directory: aseprite/build/bin
         shell: bash
         run: find . -mindepth 1 ! \( -name 'aseprite' -o -name 'aseprite.exe' -o -name 'data' -prune \) -exec rm -rf {} +
+
       - name: Make portable zip
         working-directory: aseprite/build/bin
         run: echo '# This file is here so Aseprite behaves as a portable program' > aseprite.ini
-      - name: Create release
+
+      - name: Create changelog.txt
         working-directory: aseprite/build/bin
-        run: 7z -tzip a Aseprite-${{ needs.create-release.outputs.release-tag }}-${{ runner.os }}.zip *
+        shell: bash
+        run: |
+          echo "Aseprite ${{ needs.create-release.outputs.release-tag }}" > changelog.txt
+          echo "" >> changelog.txt
+          echo "Release Notes:" >> changelog.txt
+          echo "" >> changelog.txt
+          echo "${{ needs.create-release.outputs.release-body }}" >> changelog.txt
+
+      - name: Create release zip
+        working-directory: aseprite/build/bin
+        run: 7z -tzip a Aseprite-${{ needs.create-release.outputs.release-tag }}-${{ runner.os }}.zip * changelog.txt
+
       - name: Upload release
         uses: svenstaro/upload-release-action@v2
         with:
