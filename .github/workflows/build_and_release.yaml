@@ -64,29 +64,25 @@ jobs:
     needs: create-release
     permissions:
       contents: write
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ windows-latest ]
-      fail-fast: false
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Aseprite
+      - name: Clone Aseprite source
         shell: bash
         run: |
-          git clone --recurse-submodules -j8 https://github.com/aseprite/aseprite --branch ${{ needs.create-release.outputs.release-tag }}
+          git clone --recurse-submodules -j8 https://github.com/aseprite/aseprite aseprite-src --branch ${{ needs.create-release.outputs.release-tag }}
 
       - name: Patch version.h with actual tag
         shell: bash
-        working-directory: aseprite/src
+        working-directory: aseprite-src/src
         run: |
           raw_tag="${{ needs.create-release.outputs.release-tag }}"
           version="${raw_tag#v}"
           sed -i "s/^#define ASEPRITE_VERSION .*/#define ASEPRITE_VERSION \"${version}\"/" version.h
 
       - name: Install Skia
-        working-directory: aseprite
+        working-directory: aseprite-src
         shell: bash
         run: |
           choco install wget -y --no-progress
@@ -98,7 +94,7 @@ jobs:
 
       - name: Generating Makefiles
         shell: bash
-        working-directory: aseprite
+        working-directory: aseprite-src
         run: |
           export enable_ccache=off
           export laf_backend=skia
@@ -106,7 +102,7 @@ jobs:
           export skia_arch=x64
 
           cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DENABLE_TESTS=OFF \
             -DENABLE_SCRIPTING=$enable_scripting \
             -DENABLE_CCACHE=$enable_ccache \
@@ -117,21 +113,21 @@ jobs:
 
       - name: Compiling
         shell: bash
-        working-directory: aseprite
+        working-directory: aseprite-src
         run: |
           cd build && ninja
 
-      - name: Clean Up Build folder
-        working-directory: aseprite/build/bin
+      - name: Clean up
+        working-directory: aseprite-src/build/bin
         shell: bash
-        run: find . -mindepth 1 ! \( -name 'aseprite' -o -name 'aseprite.exe' -o -name 'data' -prune \) -exec rm -rf {} +
+        run: find . -mindepth 1 ! \( -name 'aseprite.exe' -o -name 'data' -prune \) -exec rm -rf {} +
 
-      - name: Make portable zip
-        working-directory: aseprite/build/bin
-        run: echo '# This file is here so Aseprite behaves as a portable program' > aseprite.ini
+      - name: Make portable
+        working-directory: aseprite-src/build/bin
+        run: echo '# Portable mode' > aseprite.ini
 
-      - name: Create changelog.txt
-        working-directory: aseprite/build/bin
+      - name: Generate changelog.txt
+        working-directory: aseprite-src/build/bin
         shell: bash
         run: |
           echo "Aseprite ${{ needs.create-release.outputs.release-tag }}" > changelog.txt
@@ -140,14 +136,14 @@ jobs:
           echo "" >> changelog.txt
           echo "${{ needs.create-release.outputs.release-body }}" >> changelog.txt
 
-      - name: Create release zip
-        working-directory: aseprite/build/bin
-        run: 7z -tzip a Aseprite-${{ needs.create-release.outputs.release-tag }}-${{ runner.os }}.zip * changelog.txt
+      - name: Create zip
+        working-directory: aseprite-src/build/bin
+        run: 7z a Aseprite-${{ needs.create-release.outputs.release-tag }}-windows.zip *
 
       - name: Upload release
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: aseprite/build/bin/Aseprite-${{ needs.create-release.outputs.release-tag }}-${{ runner.os }}.zip
-          asset_name: Aseprite-${{ needs.create-release.outputs.release-tag }}-${{ runner.os }}.zip
+          file: aseprite-src/build/bin/Aseprite-${{ needs.create-release.outputs.release-tag }}-windows.zip
+          asset_name: Aseprite-${{ needs.create-release.outputs.release-tag }}-windows.zip
           tag: ${{ needs.create-release.outputs.release-tag }}
